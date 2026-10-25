@@ -1,0 +1,83 @@
+name: MLOps Pipeline
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # Job 1: runs on every pull request
+  lint-and-test:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Lint
+        run: flake8 src tests
+      - name: Test
+        run: pytest -v
+
+  # Job 2: runs on push to main
+  train:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Preprocess
+        run: python src/preprocess.py
+      - name: Train
+        run: python src/train.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trained-model
+          path: models/
+
+  # Job 3: runs when a tag like v1.0.0 is pushed
+  deploy-staging:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Train model for release
+        run: |
+          python src/preprocess.py
+          python src/train.py
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push image
+        run: |
+          IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_REF_NAME}
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+      - name: Deploy to staging
+        run: |
+          echo "Deploying $IMAGE to STAGING"
+          docker run --rm "$IMAGE"
